@@ -458,6 +458,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [issues, setIssues] = useState(null);
+  const [splitPct, setSplitPct] = useState(50); // left pane width %
+  const draggingRef = useRef(false);
   const fileRef = useRef(null);
   const xmlFileRef = useRef(null);
   const [, forceRender] = useState(0);
@@ -528,6 +530,50 @@ export default function App() {
     reader.readAsText(file);
     e.target.value = "";
   }
+
+  // Resizable split between editor and preview
+  useEffect(() => {
+    function onMove(e) {
+      if (!draggingRef.current) return;
+      const x = e.touches ? e.touches[0].clientX : e.clientX;
+      const pct = (x / window.innerWidth) * 100;
+      setSplitPct(Math.min(80, Math.max(20, pct))); // clamp 20–80%
+    }
+    function onUp() {
+      draggingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchmove", onMove);
+    window.addEventListener("touchend", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
+    };
+  }, []);
+
+  function startDrag() {
+    draggingRef.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
+
+  // Warn before leaving if there's an in-progress document (unsaved work)
+  useEffect(() => {
+    function beforeUnload(e) {
+      if (tree) {
+        e.preventDefault();
+        e.returnValue = ""; // required for the browser to show its prompt
+        return "";
+      }
+    }
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [tree]);
 
   // Keyboard shortcut: Ctrl+D opens attribute modal for selected node
   useEffect(() => {
@@ -693,7 +739,7 @@ export default function App() {
       ) : (
         <div className="flex-1 flex overflow-hidden">
           {/* Tree / editor */}
-          <div className="w-1/2 overflow-auto border-r border-slate-200 bg-white">
+          <div className="overflow-auto border-r border-slate-200 bg-white" style={{ width: `${splitPct}%` }}>
             <div className="p-3">
               <TreeNode
                 node={tree}
@@ -709,8 +755,15 @@ export default function App() {
               />
             </div>
           </div>
+          {/* Drag handle */}
+          <div
+            onMouseDown={startDrag}
+            onTouchStart={startDrag}
+            className="w-1.5 bg-slate-200 hover:bg-cyan-400 active:bg-cyan-500 cursor-col-resize flex-shrink-0 transition-colors"
+            title="Drag to resize"
+          />
           {/* XML preview */}
-          <div className="w-1/2 flex flex-col bg-slate-900">
+          <div className="flex flex-col bg-slate-900" style={{ width: `${100 - splitPct}%` }}>
             <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-700 flex items-center gap-2">
               <FileCode className="w-3.5 h-3.5" /> Live XML Output
             </div>
