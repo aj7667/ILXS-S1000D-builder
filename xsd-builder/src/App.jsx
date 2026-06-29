@@ -211,7 +211,7 @@ function collectChildren(store, typeNode, seen = new Set()) {
   const strip = store._stripPrefix;
   let choiceCounter = 0;
 
-  function walk(node, choiceId, inheritedMin, choiceMin) {
+  function walk(node, choiceId, inheritedMin, choiceMin, parentChoice) {
     for (const c of Array.from(node.children)) {
       const cl = ln(c);
       if (cl === "element") {
@@ -224,31 +224,33 @@ function collectChildren(store, typeNode, seen = new Set()) {
           maxOccurs: c.getAttribute("maxOccurs") === "unbounded" ? Infinity : (c.getAttribute("maxOccurs") == null ? 1 : parseInt(c.getAttribute("maxOccurs"))),
           choiceGroup: choiceId,
           choiceMin: choiceMin,
+          parentChoice: parentChoice,
           external: ref ? !store.elements[nm] : false,
         });
       } else if (cl === "sequence") {
         const seqMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
-        walk(c, choiceId, Math.min(inheritedMin, seqMin), choiceMin);
+        walk(c, choiceId, Math.min(inheritedMin, seqMin), choiceMin, parentChoice);
       } else if (cl === "choice") {
         const myChoice = "choice_" + (choiceCounter++);
         const cMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
-        // nested choice: the effective required-ness is the product of enclosing choice mins
-        walk(c, myChoice, Math.min(inheritedMin, cMin), Math.min(choiceMin, cMin));
+        // nested choice remembers the choice it sits inside (choiceId), so the
+        // validator can treat it as satisfied if a sibling branch was chosen instead
+        walk(c, myChoice, Math.min(inheritedMin, cMin), Math.min(choiceMin, cMin), choiceId);
       } else if (cl === "group") {
         const ref = strip(c.getAttribute("ref"));
         const grpMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
         if (ref && store.groups[ref] && !seen.has(ref)) {
           seen.add(ref);
-          walk(store.groups[ref], choiceId, Math.min(inheritedMin, grpMin), Math.min(choiceMin, grpMin));
+          walk(store.groups[ref], choiceId, Math.min(inheritedMin, grpMin), Math.min(choiceMin, grpMin), parentChoice);
           seen.delete(ref);
         }
       } else if (cl === "complexContent" || cl === "simpleContent") {
         const ext = Array.from(c.children).find((x) => ln(x) === "extension" || ln(x) === "restriction");
-        if (ext) walk(ext, choiceId, inheritedMin, choiceMin);
+        if (ext) walk(ext, choiceId, inheritedMin, choiceMin, parentChoice);
       }
     }
   }
-  walk(typeNode, null, 1, 1);
+  walk(typeNode, null, 1, 1, null);
   return out;
 }
 
@@ -440,11 +442,21 @@ function validateDocument(store, root) {
       if (ch.choiceGroup) {
         if (handledChoices.has(ch.choiceGroup)) continue;
         handledChoices.add(ch.choiceGroup);
-        // a choice is required only if the choice element itself had minOccurs >= 1
-        if (ch.choiceMin < 1) continue;
+        if (ch.choiceMin < 1) continue; // optional choice
         const opts = allowed.filter((x) => x.choiceGroup === ch.choiceGroup);
         const has = opts.some((o) => (counts[o.name] || 0) > 0);
-        if (!has) issues.push({ path: here, uid: node.uid, kind: "child", msg: `requires one of: ${opts.map((o) => o.name).join(", ")}` });
+        if (has) continue;
+        // If this choice is nested inside a parent choice, it's only required when
+        // the parent choice's branch was actually taken. If any element belonging to
+        // the parent choice (but outside this nested one) is present, a sibling branch
+        // was chosen, so this nested choice does not apply.
+        if (ch.parentChoice) {
+          const parentMembers = allowed.filter((x) => x.choiceGroup === ch.parentChoice && x.choiceGroup !== ch.choiceGroup);
+          const siblingChosen = parentMembers.some((o) => (counts[o.name] || 0) > 0);
+          // also: any element anywhere in a sibling branch of the parent
+          if (siblingChosen) continue;
+        }
+        issues.push({ path: here, uid: node.uid, kind: "child", msg: `requires one of: ${opts.map((o) => o.name).join(", ")}` });
         continue;
       }
       if (ch.minOccurs < 1) continue;
