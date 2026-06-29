@@ -202,8 +202,8 @@ function typeHasText(store, typeName) {
   return false;
 }
 
-// Collect allowed child elements for a complexType, walking sequence/choice/group.
-// Returns list of {name, minOccurs, maxOccurs, choiceGroup}
+// Returns list of {name, minOccurs, maxOccurs, choiceGroup, choiceMin, external}
+// choiceMin = the minOccurs of the enclosing xs:choice itself (1 if not in a choice).
 function collectChildren(store, typeNode, seen = new Set()) {
   const out = [];
   if (!typeNode) return out;
@@ -211,7 +211,7 @@ function collectChildren(store, typeNode, seen = new Set()) {
   const strip = store._stripPrefix;
   let choiceCounter = 0;
 
-  function walk(node, choiceId, inheritedMin) {
+  function walk(node, choiceId, inheritedMin, choiceMin) {
     for (const c of Array.from(node.children)) {
       const cl = ln(c);
       if (cl === "element") {
@@ -220,34 +220,35 @@ function collectChildren(store, typeNode, seen = new Set()) {
         const ownMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
         out.push({
           name: nm,
-          // a child is only required if BOTH its own min and every enclosing group/choice min are >= 1
           minOccurs: Math.min(ownMin, inheritedMin),
           maxOccurs: c.getAttribute("maxOccurs") === "unbounded" ? Infinity : (c.getAttribute("maxOccurs") == null ? 1 : parseInt(c.getAttribute("maxOccurs"))),
           choiceGroup: choiceId,
+          choiceMin: choiceMin,
           external: ref ? !store.elements[nm] : false,
         });
       } else if (cl === "sequence") {
         const seqMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
-        walk(c, choiceId, Math.min(inheritedMin, seqMin));
+        walk(c, choiceId, Math.min(inheritedMin, seqMin), choiceMin);
       } else if (cl === "choice") {
         const myChoice = "choice_" + (choiceCounter++);
-        const choiceMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
-        walk(c, myChoice, Math.min(inheritedMin, choiceMin));
+        const cMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
+        // nested choice: the effective required-ness is the product of enclosing choice mins
+        walk(c, myChoice, Math.min(inheritedMin, cMin), Math.min(choiceMin, cMin));
       } else if (cl === "group") {
         const ref = strip(c.getAttribute("ref"));
         const grpMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
         if (ref && store.groups[ref] && !seen.has(ref)) {
           seen.add(ref);
-          walk(store.groups[ref], choiceId, Math.min(inheritedMin, grpMin));
+          walk(store.groups[ref], choiceId, Math.min(inheritedMin, grpMin), Math.min(choiceMin, grpMin));
           seen.delete(ref);
         }
       } else if (cl === "complexContent" || cl === "simpleContent") {
         const ext = Array.from(c.children).find((x) => ln(x) === "extension" || ln(x) === "restriction");
-        if (ext) walk(ext, choiceId, inheritedMin);
+        if (ext) walk(ext, choiceId, inheritedMin, choiceMin);
       }
     }
   }
-  walk(typeNode, null, 1);
+  walk(typeNode, null, 1, 1);
   return out;
 }
 
@@ -286,10 +287,13 @@ function buildSkeleton(store, elName, depth, typeStack) {
   const handledChoices = new Set();
   for (const ch of children) {
     if (ch.external) continue;
-    if (ch.minOccurs < 1) continue; // only required
     if (ch.choiceGroup) {
       if (handledChoices.has(ch.choiceGroup)) continue;
       handledChoices.add(ch.choiceGroup);
+      if (ch.choiceMin < 1) continue; // optional choice — don't auto-build
+      // build only the first option of a required choice
+    } else {
+      if (ch.minOccurs < 1) continue; // optional — only build required
     }
     if (stack.includes(ch.name)) continue; // avoid infinite recursion
     const childNode = buildSkeleton(store, ch.name, depth + 1, [...stack, elName]);
@@ -433,18 +437,17 @@ function validateDocument(store, root) {
     for (const c of node.children) counts[c.name] = (counts[c.name] || 0) + 1;
     const handledChoices = new Set();
     for (const ch of allowed) {
-      if (ch.minOccurs < 1) continue;
       if (ch.choiceGroup) {
         if (handledChoices.has(ch.choiceGroup)) continue;
         handledChoices.add(ch.choiceGroup);
-        // a choice is only required if at least one of its members is required (minOccurs >= 1)
+        // a choice is required only if the choice element itself had minOccurs >= 1
+        if (ch.choiceMin < 1) continue;
         const opts = allowed.filter((x) => x.choiceGroup === ch.choiceGroup);
-        const choiceRequired = opts.some((o) => o.minOccurs >= 1);
-        if (!choiceRequired) continue;
         const has = opts.some((o) => (counts[o.name] || 0) > 0);
         if (!has) issues.push({ path: here, uid: node.uid, kind: "child", msg: `requires one of: ${opts.map((o) => o.name).join(", ")}` });
         continue;
       }
+      if (ch.minOccurs < 1) continue;
       if ((counts[ch.name] || 0) < ch.minOccurs) {
         issues.push({ path: here, uid: node.uid, kind: "child", msg: `missing required child <${ch.name}>` });
       }
