@@ -211,38 +211,43 @@ function collectChildren(store, typeNode, seen = new Set()) {
   const strip = store._stripPrefix;
   let choiceCounter = 0;
 
-  function walk(node, choiceId) {
+  function walk(node, choiceId, inheritedMin) {
     for (const c of Array.from(node.children)) {
       const cl = ln(c);
       if (cl === "element") {
         const ref = c.getAttribute("ref");
         const nm = ref ? strip(ref) : c.getAttribute("name");
+        const ownMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
         out.push({
           name: nm,
-          minOccurs: c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs")),
+          // a child is only required if BOTH its own min and every enclosing group/choice min are >= 1
+          minOccurs: Math.min(ownMin, inheritedMin),
           maxOccurs: c.getAttribute("maxOccurs") === "unbounded" ? Infinity : (c.getAttribute("maxOccurs") == null ? 1 : parseInt(c.getAttribute("maxOccurs"))),
           choiceGroup: choiceId,
           external: ref ? !store.elements[nm] : false,
         });
       } else if (cl === "sequence") {
-        walk(c, choiceId);
+        const seqMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
+        walk(c, choiceId, Math.min(inheritedMin, seqMin));
       } else if (cl === "choice") {
         const myChoice = "choice_" + (choiceCounter++);
-        walk(c, myChoice);
+        const choiceMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
+        walk(c, myChoice, Math.min(inheritedMin, choiceMin));
       } else if (cl === "group") {
         const ref = strip(c.getAttribute("ref"));
+        const grpMin = c.getAttribute("minOccurs") == null ? 1 : parseInt(c.getAttribute("minOccurs"));
         if (ref && store.groups[ref] && !seen.has(ref)) {
           seen.add(ref);
-          walk(store.groups[ref], choiceId);
+          walk(store.groups[ref], choiceId, Math.min(inheritedMin, grpMin));
           seen.delete(ref);
         }
       } else if (cl === "complexContent" || cl === "simpleContent") {
         const ext = Array.from(c.children).find((x) => ln(x) === "extension" || ln(x) === "restriction");
-        if (ext) walk(ext, choiceId);
+        if (ext) walk(ext, choiceId, inheritedMin);
       }
     }
   }
-  walk(typeNode, null);
+  walk(typeNode, null, 1);
   return out;
 }
 
@@ -432,8 +437,10 @@ function validateDocument(store, root) {
       if (ch.choiceGroup) {
         if (handledChoices.has(ch.choiceGroup)) continue;
         handledChoices.add(ch.choiceGroup);
-        // at least one option of the choice must be present
+        // a choice is only required if at least one of its members is required (minOccurs >= 1)
         const opts = allowed.filter((x) => x.choiceGroup === ch.choiceGroup);
+        const choiceRequired = opts.some((o) => o.minOccurs >= 1);
+        if (!choiceRequired) continue;
         const has = opts.some((o) => (counts[o.name] || 0) > 0);
         if (!has) issues.push({ path: here, uid: node.uid, kind: "child", msg: `requires one of: ${opts.map((o) => o.name).join(", ")}` });
         continue;
@@ -459,6 +466,8 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [issues, setIssues] = useState(null);
   const [splitPct, setSplitPct] = useState(50); // left pane width %
+  const [xslName, setXslName] = useState(null); // referenced stylesheet filename
+  const xslFileRef = useRef(null);
   const draggingRef = useRef(false);
   const fileRef = useRef(null);
   const xmlFileRef = useRef(null);
@@ -623,7 +632,14 @@ export default function App() {
     setIssues(validateDocument(store, tree));
   }
 
-  const xmlOutput = tree && store ? serializeDoc(tree, store) : "";
+  function handleXSLFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setXslName(file.name); // reference by filename in the output PI
+    e.target.value = "";
+  }
+
+  const xmlOutput = tree && store ? serializeDoc(tree, store, xslName) : "";
 
   function copyXML() {
     navigator.clipboard?.writeText(xmlOutput);
@@ -634,7 +650,7 @@ export default function App() {
   function downloadXML() {
     const filename = (store?.rootElement || "document") + ".xml";
     try {
-      const blob = new Blob([xmlOutput], { type: "application/xml" });
+      const blob = new Blob([serializeDoc(tree, store, xslName)], { type: "application/xml" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -684,6 +700,10 @@ export default function App() {
           <input ref={xmlFileRef} type="file" accept=".xml" onChange={handleXMLFile} className="hidden" />
           {tree && (
             <>
+              <button onClick={() => xslFileRef.current?.click()} title="Reference an .xsl stylesheet in the exported XML" className="flex items-center gap-1.5 text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded transition">
+                <FileCode className="w-3.5 h-3.5" /> {xslName ? "XSL ✓" : "Link XSL"}
+              </button>
+              <input ref={xslFileRef} type="file" accept=".xsl,.xslt" onChange={handleXSLFile} className="hidden" />
               <button onClick={runValidation} className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded transition">
                 <ShieldCheck className="w-3.5 h-3.5" /> Validate
               </button>
@@ -766,6 +786,14 @@ export default function App() {
           <div className="flex flex-col bg-slate-900" style={{ width: `${100 - splitPct}%` }}>
             <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-700 flex items-center gap-2">
               <FileCode className="w-3.5 h-3.5" /> Live XML Output
+              {xslName && (
+                <span className="ml-auto flex items-center gap-1.5 text-cyan-400">
+                  <span title="Stylesheet referenced in output">↳ {xslName}</span>
+                  <button onClick={() => setXslName(null)} title="Remove stylesheet reference" className="text-slate-500 hover:text-red-400">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              )}
             </div>
             <pre className="flex-1 overflow-auto p-3 text-xs leading-relaxed text-slate-100 font-mono whitespace-pre">{xmlOutput}</pre>
           </div>
