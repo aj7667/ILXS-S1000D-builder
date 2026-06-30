@@ -672,7 +672,10 @@ export default function App() {
 
   function downloadXML() {
     const filename = (store?.rootElement || "document") + ".xml";
-    const content = serializeDoc(tree, store, xslName); // include XSL reference, same as preview
+    // Build content fresh from current state, mirroring the live preview exactly.
+    const styleLine = xslName ? `<?xml-stylesheet type="text/xsl" href="${escapeXML(xslName)}"?>\n` : "";
+    const body = serializeNode(tree, 0, store, true);
+    const content = `<?xml version="1.0" encoding="UTF-8"?>\n` + styleLine + body;
     try {
       const blob = new Blob([content], { type: "application/xml" });
       const url = URL.createObjectURL(blob);
