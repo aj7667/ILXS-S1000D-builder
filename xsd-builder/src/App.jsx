@@ -664,8 +664,9 @@ export default function App() {
 
   function downloadXML() {
     const filename = (store?.rootElement || "document") + ".xml";
+    const content = serializeDoc(tree, store, xslName); // include XSL reference, same as preview
     try {
-      const blob = new Blob([serializeDoc(tree, store, xslName)], { type: "application/xml" });
+      const blob = new Blob([content], { type: "application/xml" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -678,21 +679,18 @@ export default function App() {
         URL.revokeObjectURL(url);
       }, 100);
     } catch (e) {
-      // Sandbox blocked the blob download — fall back to a data-URI in a new tab
       try {
-        const dataUri = "data:application/xml;charset=utf-8," + encodeURIComponent(xmlOutput);
         const w = window.open();
         if (w) {
           w.document.write("<pre style='white-space:pre-wrap;word-break:break-word'>" +
-            xmlOutput.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") +
+            content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") +
             "</pre>");
           w.document.title = filename;
         } else {
           throw new Error("popup blocked");
         }
       } catch (e2) {
-        // Last resort: copy to clipboard and tell the user
-        navigator.clipboard?.writeText(xmlOutput);
+        navigator.clipboard?.writeText(content);
         setError("Download was blocked by the sandbox. The XML has been copied to your clipboard — paste it into a new file and save as " + filename + ".");
       }
     }
