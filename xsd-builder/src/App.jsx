@@ -335,7 +335,12 @@ function serializeNode(node, indent, store, isRoot) {
     .map(([k, v]) => `${k}="${escapeXML(v)}"`);
   let rootNS = "";
   if (isRoot) {
-    rootNS = ` xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"`;
+    // Only add default namespace declarations if the document doesn't already carry them
+    // (imported documents bring their own xmlns:* attributes, including xsi).
+    const haveXlink = Object.keys(node.attributes).some((k) => k === "xmlns:xlink");
+    const haveRdf = Object.keys(node.attributes).some((k) => k === "xmlns:rdf");
+    if (!haveXlink) rootNS += ` xmlns:xlink="http://www.w3.org/1999/xlink"`;
+    if (!haveRdf) rootNS += ` xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"`;
   }
   const attrPart = attrStrs.length ? " " + attrStrs.join(" ") : "";
   const open = `<${node.name}${rootNS}${attrPart}`;
@@ -396,10 +401,13 @@ function importXML(store, xmlText) {
   function convert(domEl) {
     const name = domEl.localName || domEl.nodeName.replace(/^.*:/, "");
     const node = makeNode(store, name);
-    // attributes
+    // attributes — keep namespace declarations on the root so the output stays well-formed
     for (const at of Array.from(domEl.attributes)) {
       const an = at.name;
-      if (an.startsWith("xmlns")) continue;
+      if (an === "xmlns" || an.startsWith("xmlns:")) {
+        node.attributes[an] = at.value; // preserve xmlns:xsi, xmlns:xlink, etc.
+        continue;
+      }
       node.attributes[an] = at.value;
     }
     // children: elements vs text
