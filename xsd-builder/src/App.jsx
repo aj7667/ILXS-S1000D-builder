@@ -429,6 +429,17 @@ function importXML(store, xmlText) {
   return convert(rootEl);
 }
 
+// ---------------- Analytics helper ----------------
+// Safely fires a Google Analytics event if gtag is present on the page.
+// No-ops in environments without gtag (e.g. the artifact preview).
+function track(eventName, params) {
+  try {
+    if (typeof window !== "undefined" && typeof window.gtag === "function") {
+      window.gtag("event", eventName, params || {});
+    }
+  } catch (e) { /* never let analytics break the app */ }
+}
+
 // ---------------- React UI ----------------
 // ---------------- Document validation ----------------
 function validateDocument(store, root) {
@@ -530,10 +541,12 @@ export default function App() {
         setTree(skel);
         setSelectedUid(skel.uid);
         setError(null);
+        track("load_xsd", { root_element: s.rootElement, file_name: file.name });
       } catch (err) {
         setError(err.message);
         setStore(null);
         setTree(null);
+        track("load_xsd_error", { message: err.message });
       }
     };
     reader.readAsText(file);
@@ -555,8 +568,10 @@ export default function App() {
         setSelectedUid(imported.uid);
         setIssues(null);
         setError(null);
+        track("load_xml", { file_name: file.name });
       } catch (err) {
         setError(err.message);
+        track("load_xml_error", { message: err.message });
       }
     };
     reader.readAsText(file);
@@ -652,13 +667,16 @@ export default function App() {
 
   function runValidation() {
     if (!tree || !store) return;
-    setIssues(validateDocument(store, tree));
+    const result = validateDocument(store, tree);
+    setIssues(result);
+    track("validate", { issue_count: result.length });
   }
 
   function handleXSLFile(e) {
     const file = e.target.files[0];
     if (!file) return;
     setXslName(file.name); // reference by filename in the output PI
+    track("link_xsl", { file_name: file.name });
     e.target.value = "";
   }
 
@@ -668,10 +686,12 @@ export default function App() {
     navigator.clipboard?.writeText(xmlOutput);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+    track("copy_xml", { has_xsl: !!xslName });
   }
 
   function downloadXML() {
     const filename = (store?.rootElement || "document") + ".xml";
+    track("download_xml", { file_name: filename, has_xsl: !!xslName });
     // Build content fresh from current state, mirroring the live preview exactly.
     const styleLine = xslName ? `<?xml-stylesheet type="text/xsl" href="${escapeXML(xslName)}"?>\n` : "";
     const body = serializeNode(tree, 0, store, true);
